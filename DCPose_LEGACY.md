@@ -35,18 +35,28 @@ These are old dependencies. On a modern system, installing them may require an o
 DCPose uses the CUDA extensions in [`thirdparty/deform_conv/`](./thirdparty/deform_conv/).
 
 ```bash
+conda activate dcpose_legacy_env
+
+export CC="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc"
+export CXX="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++"
+export CUDAHOSTCXX="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++"
+export TORCH_CUDA_ARCH_LIST="7.5"
+
 cd thirdparty/deform_conv
+rm -rf build deform_conv.egg-info
 python setup.py develop
 cd ../..
 ```
 
-The build requires a working CUDA toolkit, `nvcc`, and a PyTorch installation compatible with that toolkit.
+The build requires a working CUDA toolkit, `nvcc`, and a PyTorch installation compatible with that toolkit. The legacy environment uses GCC/G++ 8.4 because CUDA 10.1 rejects newer host compilers. The repository's [`thirdparty/deform_conv/setup.py`](./thirdparty/deform_conv/setup.py) passes `CUDAHOSTCXX`/`CXX` to NVCC with `-ccbin`; this is necessary because the old PyTorch 1.4 build machinery may otherwise invoke a bare system `gcc`.
 
 Optional import check:
 
 ```bash
-python -c "import deform_conv_cuda; print('deform_conv_cuda loaded')"
+python -c "import torch; import deform_conv_cuda; import deform_pool_cuda; print('deformable convolutions loaded')"
 ```
+
+Import PyTorch before either extension. These legacy extensions depend on symbols exported by the loaded PyTorch runtime, so importing an extension first can produce undefined-symbol errors such as `THPVariableClass` or `c10::BFloat16`.
 
 ### 4. Download the pretrained supplementary files
 
@@ -147,8 +157,8 @@ Run the smoke test in the indicated step before running a long clip. A passing t
 |---|---:|---|---|---|
 | Python/PyTorch/CUDA version incompatibility | 2 | `python --version && python -c "import torch, torchvision; print('torch:', torch.__version__); print('torchvision:', torchvision.__version__); print('CUDA build:', torch.version.cuda); print('CUDA available:', torch.cuda.is_available())"` | Import errors, missing CUDA, or a PyTorch/CUDA combination incompatible with the installed driver/toolkit. | **PASSED in `dcpose_legacy_env`.** Verified Python 3.6.12, torch 1.4.0, torchvision 0.5.0, CUDA build 10.1, and CUDA available on the NVIDIA GeForce RTX 5090. The base Python 3.12.7 environment is intentionally not used for legacy validation. |
 | Required Python packages are missing | 2 | `python -c "import cv2, numpy, PIL, yaml, torch, torchvision, tqdm; print('runtime imports OK')"` | Any `ModuleNotFoundError` or binary import error. | **PASSED in `dcpose_legacy_env`.** Verified cv2 4.4.0, NumPy 1.19.2, Pillow 7.2.0, PyYAML 5.3.1, tqdm 4.49.0, torch 1.4.0, and torchvision 0.5.0. The base Python 3.12.7 environment remains reserved for future modernization work. |
-| CUDA toolkit/compiler is unavailable for the custom extension | 3 | `nvcc --version` | `nvcc` is missing or reports a toolkit incompatible with the installed PyTorch CUDA build. | **Refined diagnosis:** the NVIDIA driver is installed and working (`nvidia-smi` reports driver 580.178.04, driver-supported CUDA 13.0, and an RTX 5090); `dcpose_legacy_env` can access the GPU and PyTorch reports CUDA 10.1. However, the CUDA development toolkit is not exposed: `CUDA_HOME` is unset, `nvcc` is not found, no standard toolkit path or Conda `nvcc` was found, and `torch.utils.cpp_extension.CUDA_HOME` is `None`. The missing piece is the toolkit/compiler, not the driver/runtime. Install or expose a toolkit, set `CUDA_HOME`, then rerun the build. Because the GPU is an RTX 5090, the legacy CUDA 10.1 toolchain may still be unable to compile for this architecture; if so, record legacy reproduction as hardware/toolchain-blocked and continue with modernization. |
-| Deformable-convolution extension did not build or cannot load | 3 | `python -c "import deform_conv_cuda; print('deform_conv_cuda loaded')"` | `ModuleNotFoundError`, undefined symbols, or a shared-library loading error. | **Pending smoke test.** Rebuild against the selected PyTorch/CUDA pair, or port to a behaviorally equivalent maintained operator. |
+| CUDA toolkit/compiler is unavailable for the custom extension | 3 | `nvcc --version` | `nvcc` is missing or reports a toolkit incompatible with the installed PyTorch CUDA build. | **TOOLKIT AVAILABLE.** The Conda environment exposes `/home/lunet/cogt/.conda/envs/dcpose_legacy_env/bin/nvcc`, reporting CUDA 10.1, V10.1.243, matching the legacy PyTorch CUDA build. The NVIDIA driver version reported by `nvidia-smi` is not a substitute for an installed toolkit. CUDA 10.1 rejects host compilers newer than GCC 8, so the environment uses the matching Conda GCC/G++ 8.4 toolchain (`x86_64-conda-linux-gnu-gcc` and `x86_64-conda-linux-gnu-g++`). `CC`, `CXX`, and `CUDAHOSTCXX` point directly to those prefixed executables; `which gcc` may still show `/usr/bin/gcc` because it only searches `PATH`. The `cc1plus` backend exists and passes a standalone C++ smoke test. The extension setup passes the selected host compiler to NVCC with `-ccbin`, avoiding the old PyTorch build path's fallback to system `gcc`. `TORCH_CUDA_ARCH_LIST=7.5` is required as a compatibility build experiment because PyTorch 1.4/CUDA 10.1 cannot identify the RTX 5090's native architecture; this does not provide native RTX 5090 support. |
+| Deformable-convolution extension did not build or cannot load | 3 | `python -c "import torch; import deform_conv_cuda; import deform_pool_cuda; print('deformable convolutions loaded')"` | `ModuleNotFoundError`, undefined symbols, or a shared-library loading error. | **COMPILED.** Both shared libraries were produced after selecting GCC/G++ 8.4 and passing `-ccbin` to NVCC. Import PyTorch before the extensions because the legacy modules depend on symbols exported by the loaded PyTorch 1.4 runtime; importing them first produced undefined `c10::BFloat16`/`TypeMeta` and `THPVariableClass` symbols. The correct smoke test is therefore `import torch` followed by `import deform_conv_cuda` and `import deform_pool_cuda`. Compilation/import success still requires a subsequent actual CUDA operator/model execution test on the RTX 5090; `sm_75` is only a compatibility experiment, not native architecture validation. |
 | Supplementary model files are missing or placed incorrectly | 4–5 | `test -f DcPose_supp_files/object_detector/YOLOv3/yolov3.weights && test -f DcPose_supp_files/pretrained_models/DCPose/PoseTrack17_DCPose.pth && echo 'model files found'` | Either `test` command fails, or the symlink points to the wrong directory. | **Pending smoke test.** Download the supplementary archive and place/link it at `DCPose_supp_files` with the expected layout. |
 | The supplementary directory symlink is broken | 5 | `readlink -f DcPose_supp_files && find -L DcPose_supp_files -maxdepth 4 -type f | sort | sed -n '1,30p'` | The resolved path does not exist or the expected weights are absent. | **Pending smoke test.** Recreate the symlink using an absolute path and verify both required weights. |
 | The detector is forced onto nonexistent GPU 3 | 6 | `nvidia-smi --query-gpu=index,name --format=csv` and inspect the hardcoded `CUDA_VISIBLE_DEVICES` line in `object_detector/YOLOv3/detector_yolov3.py` | There is no GPU 3, or the detector uses a different GPU than the one selected at launch. | **Pending smoke test.** Remove the detector's hardcoded GPU override and select the device with `CUDA_VISIBLE_DEVICES`. |
@@ -166,11 +176,63 @@ Run the smoke test in the indicated step before running a long clip. A passing t
 | The clip is too long for a first run or storage is insufficient | 7–9 | Run a very short clip first and check `df -h .`; estimate one JPEG per frame plus visualization/output storage. | Disk fills, processing is unexpectedly slow, or the run fails partway through. | **Pending smoke test.** Start with a three-to-ten-frame clip, confirm outputs, then scale up while monitoring disk and runtime. |
 | Frame boundary handling behaves unexpectedly | 8 | Run a clip of at least three frames and inspect the first and last frame outputs. | The implementation reuses the boundary frame when there is no previous or next frame; this is expected, but very short clips provide little temporal context. | **Expected behavior.** Retain boundary-frame reuse for legacy compatibility; document any changed temporal padding in modernisation. |
 
+## Legacy compiler and extension lessons
+
+The following facts were established while bringing up the legacy build on the RTX 5090:
+
+1. **Driver CUDA and toolkit CUDA are different things.** `nvidia-smi` reports the CUDA version supported by the installed NVIDIA driver; it does not prove that `nvcc` is installed. PyTorch can use its bundled CUDA runtime without `nvcc`, but compiling `deform_conv_cuda` requires the toolkit.
+2. **The working legacy combination is deliberately old.** The validated environment uses Python 3.6.12, PyTorch 1.4.0, torchvision 0.5.0, and CUDA 10.1. This is a reproducibility environment, not the recommended basis for modernization.
+3. **CUDA 10.1 requires an old host compiler.** Its compiler checks reject GCC versions newer than 8. GCC/G++ 8.4 must be installed as a matching pair; mixing GCC 8 frontends with newer runtime/compiler packages can cause confusing failures.
+4. **Conda compiler names are prefixed.** The usable executables are `x86_64-conda-linux-gnu-gcc` and `x86_64-conda-linux-gnu-g++`. Therefore `which gcc` may still report `/usr/bin/gcc` even when `CC` and `CXX` correctly point to GCC 8. `which` searches `PATH`; it does not inspect those variables.
+5. **`CC`, `CXX`, and `CUDAHOSTCXX` are shell variables.** They select compilers for tools that honor them. `unset CC CXX CUDAHOSTCXX` removes the overrides and returns compiler selection to defaults; it does not uninstall anything.
+6. **`cc1plus` is GCC's C++ backend.** A healthy GCC 8 installation contains it under `"$CONDA_PREFIX/libexec/gcc/x86_64-conda-linux-gnu/8.4.0/cc1plus"`. The direct test below verifies the backend without relying on `which gcc`.
+7. **NVCC may ignore `CUDAHOSTCXX` unless `-ccbin` is explicit.** The extension setup now adds `-ccbin` from `CUDAHOSTCXX` or `CXX`, avoiding a wrapper directory and preventing NVCC from falling back to `/usr/bin/gcc`.
+8. **RTX 5090 architecture support is not present in the legacy stack.** PyTorch 1.4/CUDA 10.1 cannot identify the GPU's native compute capability. `TORCH_CUDA_ARCH_LIST=7.5` allows compilation as a compatibility experiment, but it does not produce native RTX 5090 kernels. A successful build does not guarantee runtime execution; a later CUDA-kernel test is required.
+9. **Extension import order matters.** The generated `.so` files are not standalone Python modules. Load `torch` first, then `deform_conv_cuda` and `deform_pool_cuda`. Importing the extension first can fail even when compilation and linkage are otherwise correct.
+
+### Compiler smoke tests
+
+Run these commands from the activated legacy environment:
+
+```bash
+echo "$CC"
+echo "$CXX"
+echo "$CUDAHOSTCXX"
+
+"$CC" --version
+"$CXX" --version
+"$CC" -print-prog-name=cc1plus
+
+printf 'int main() { return 0; }\n' | \
+  "$CXX" -x c++ -std=c++11 -c -o /tmp/dcpose_cc1plus_test.o -
+rm -f /tmp/dcpose_cc1plus_test.o
+```
+
+Expected results are GCC/G++ 8.4.0, a real `cc1plus` path, and a successful temporary compilation. A failure here is a compiler installation or environment problem; an error only during NVCC compilation indicates host-compiler selection and should be investigated through the `-ccbin` argument.
+
+### Extension smoke tests
+
+After `python setup.py develop` completes, run:
+
+```bash
+python - <<'PY'
+import torch
+print("PyTorch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+import deform_conv_cuda
+import deform_pool_cuda
+print("deformable convolutions loaded")
+PY
+```
+
+If this succeeds, follow it with a small actual CUDA operator/model execution. Import success alone does not prove that the RTX 5090 can execute kernels compiled by the legacy CUDA 10.1 stack. If the import fails with `THPVariableClass` or `c10::BFloat16` while `torch` was imported first, investigate PyTorch ABI/build compatibility; do not reinstall GCC as the first response.
+
 ## Operational details to keep in mind
 
 - The demo detects people independently in every frame; it does not track person identities.
 - The output video writer in [`utils/utils_video.py`](./utils/utils_video.py) defaults to 25 FPS rather than preserving the input FPS.
 - The output codec is fixed to `DIVX` and may need to be changed to `mp4v`.
 - The default checkpoint is PoseTrack17-specific.
+- The legacy deformable-convolution build was validated only as a compatibility experiment on the RTX 5090 with `TORCH_CUDA_ARCH_LIST=7.5`; native architecture support requires the modernization path.
 - The `--gpu_id` argument in [`tools/inference.py`](./tools/inference.py) does not by itself control all CUDA usage; the code uses direct `.cuda()` calls and the detector has its own GPU environment setting.
 - The official pipeline is separate from the Ultralytics-based scripts in [`../Week4Demo/`](../Week4Demo/).
